@@ -16,6 +16,7 @@ class BMS_Logger_App:
     def __init__(self, root):
         self.root = root
         self.root.title("QC Test Application v1.0")
+        # Version Control Test: Initializing the main window geometry
         self.root.geometry("1280x720")
         
         # --- Data & State ---
