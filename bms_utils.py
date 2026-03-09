@@ -181,6 +181,6 @@ class TxBuilder:
 
                 factor = field.get('factor', 1)
                 # Inverse factor for TX (Value -> Raw)
-                values.append(int(raw_val / factor) if factor != 1 else int(raw_val))
+                values.append(int(round(raw_val / factor)) if factor != 1 else int(raw_val))
         
         return struct.pack(TxBuilder.build_fmt(config), *values)

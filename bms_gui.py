@@ -1,4 +1,5 @@
 import tkinter as tk
+import time
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 import serial.tools.list_ports
 import queue
@@ -26,6 +27,7 @@ class BMS_Logger_App:
         self.serial_thread = None
         self.csv_thread = None
         self.is_connected = False
+        self.last_packet_time = 0.0
         self.entries = {} 
         self.tx_state = {} # Stores current TX values
         self.tx_vars = {}
@@ -96,12 +98,15 @@ class BMS_Logger_App:
         right_container.pack(side=tk.RIGHT, padx=20)
 
         # --- LOGGING CONTROLS ---
-        self.lbl_log_status = tk.Label(right_container, text="Log: IDLE", font=("PT Sans", 9), fg="gray", bg="#f5f5f5")
-        self.lbl_log_status.pack(side=tk.LEFT, padx=(0, 10))
+        log_ctrl_frame = tk.Frame(right_container, bg="#f5f5f5")
+        log_ctrl_frame.pack(side=tk.LEFT, padx=(0, 15))
 
-        self.btn_record = tk.Button(right_container, text="START LOGGING", command=self._toggle_recording, 
+        self.btn_record = tk.Button(log_ctrl_frame, text="START LOGGING", command=self._toggle_recording, 
                                   bg="#e6f7ff", font=("PT Sans", 9, "bold"), width=14, state="disabled")
-        self.btn_record.pack(side=tk.LEFT, padx=(0, 15))
+        self.btn_record.pack(side=tk.TOP)
+
+        self.lbl_log_status = tk.Label(log_ctrl_frame, text="Log: IDLE", font=("PT Sans", 8), fg="gray", bg="#f5f5f5")
+        self.lbl_log_status.pack(side=tk.TOP)
 
         tk.Frame(right_container, width=1, bg="#cccccc").pack(side=tk.LEFT, fill="y", padx=(0, 15), pady=5)
 
@@ -321,6 +326,7 @@ class BMS_Logger_App:
             try:
                 self.serial_thread = SerialWorker(port, int(baud), self.serial_data_queue, self.status_queue, self.gui_log_queue)
                 self.serial_thread.start()
+                self.last_packet_time = time.time()
                 self.is_connected = True
                 
                 self.btn_connect.config(text="Disconnect", bg="#ffcccc")
@@ -354,7 +360,7 @@ class BMS_Logger_App:
                 set_system_awake(True)
                 
                 # 2. Start Logger
-                self.csv_thread = CSVLoggerThread()
+                self.csv_thread = CSVLoggerThread(self.gui_log_queue)
                 self.csv_thread.start_logging(fname)
                 self.btn_record.config(text="STOP LOGGING", bg="#ffe6e6")
                 self.lbl_log_status.config(text=f"Recording: {os.path.basename(fname)}", fg="red")
@@ -372,6 +378,10 @@ class BMS_Logger_App:
             self.log_gui("Stopped logging (System Sleep Enabled)")
 
     def _system_tick(self):
+        # Multitasking Optimization: Limit updates per tick to prevent GUI freeze
+        max_updates = 20
+        updates_processed = 0
+
         while not self.gui_log_queue.empty():
             msg = self.gui_log_queue.get_nowait()
             self.log_gui(msg, internal=True)
@@ -379,18 +389,34 @@ class BMS_Logger_App:
         while not self.status_queue.empty():
             msg_type, msg_val = self.status_queue.get_nowait()
             if msg_type == "ERROR":
-                self._disconnect()
-                messagebox.showerror("Connection Error", f"Lost Connection:\n{msg_val}")
+                if self.is_connected:
+                    self._disconnect()
+                    messagebox.showwarning("Connection Lost", f"Communication Halted.\n\nReason: {msg_val}")
 
-        while not self.serial_data_queue.empty():
+        while not self.serial_data_queue.empty() and updates_processed < max_updates:
             rx_time, data = self.serial_data_queue.get_nowait()
+            self.last_packet_time = time.time()
             
             if self.csv_thread and self.csv_thread.running:
                 self.csv_thread.queue.put((rx_time, data['flat'], data['stats']))
 
             self._update_gui(data)
+            updates_processed += 1
+
+        # --- WATCHDOG TIMER (Industry Standard) ---
+        # Detects if data has stopped arriving (Unplugged or Frozen)
+        if self.is_connected:
+            # Sampling Rate: 0.1s (100ms)
+            # Strategy: Timeout after 0.5s (5 missed packets) for fast detection
+            if time.time() - self.last_packet_time > 0.5:
+                # Check if the port is physically missing from the OS
+                current_ports = [p.device for p in serial.tools.list_ports.comports()]
+                if self.serial_thread and self.serial_thread.port not in current_ports:
+                    self.status_queue.put(("ERROR", "USB Device Unplugged (Port Lost)"))
+                else:
+                    self.status_queue.put(("ERROR", "Connection Timeout: No data received Check the COM port."))
             
-        self.root.after(50, self._system_tick)
+        self.root.after(20, self._system_tick)
 
     def _update_gui(self, data):
         flat = data['flat']

@@ -19,8 +19,9 @@ from bms_utils import (
 #           THREADED MODULES
 # ==========================================
 class CSVLoggerThread(threading.Thread):
-    def __init__(self):
+    def __init__(self, log_queue=None):
         super().__init__(daemon=True)
+        self.log_queue = log_queue
         self.queue = queue.Queue()
         self.running = False
         self.filename = None
@@ -89,7 +90,10 @@ class CSVLoggerThread(threading.Thread):
             except queue.Empty:
                 continue
             except Exception as e:
-                pass 
+                if self.log_queue:
+                    self.log_queue.put(f"CSV Error: {e}")
+                else:
+                    print(f"CSV Error: {e}")
         
         if self.file_handle: self.file_handle.close()
 
@@ -120,6 +124,7 @@ class SerialWorker(threading.Thread):
             self.ser.write(frame)
         except Exception as e:
             self.log_queue.put(f"TX Error: {e}")
+            self.status_queue.put(("ERROR", f"Transmission Failed: {e}"))
 
     def run(self):
         buffer = bytearray()
@@ -133,6 +138,8 @@ class SerialWorker(threading.Thread):
 
                 if self.ser.in_waiting:
                     buffer.extend(self.ser.read(self.ser.in_waiting))
+                else:
+                    time.sleep(0.001) # Optimization: Low latency sleep (1ms) only when idle
 
                 while len(buffer) >= TOTAL_SIZE:
                     if buffer[:HEADER_SIZE] == RX_SYNC_HEADER:
@@ -164,11 +171,11 @@ class SerialWorker(threading.Thread):
                             del buffer[:1]
                     else:
                         del buffer[:1] 
-                
-                time.sleep(0.005) 
 
-        except (OSError, serial.SerialException) as e:
-            self.status_queue.put(("ERROR", str(e)))
+        except (OSError, serial.SerialException):
+            self.status_queue.put(("ERROR", "The USB device was unplugged or the COM port became unavailable."))
+        except Exception as e:
+            self.status_queue.put(("ERROR", f"System Error: {str(e)}"))
         finally:
             if self.ser: self.ser.close()
             self.log_queue.put("Serial Thread Exited")
